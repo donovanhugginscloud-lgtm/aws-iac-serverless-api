@@ -1,17 +1,30 @@
 provider "aws" {
-  region = "us-east-1"
+  region = var.aws_region
 }
 
+# ==============================================================================
+# PERSISTENCE TIER (DYNAMODB)
+# ==============================================================================
+
 resource "aws_dynamodb_table" "db" {
-  name           = "ProductInventory"
-  billing_mode   = "PAY_PER_REQUEST"
-  hash_key       = "productId"
+  name         = "ProductInventory"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "productId"
 
   attribute {
     name = "productId"
     type = "S"
   }
+
+  tags = {
+    Environment = "Production"
+    Project     = "Serverless-API"
+  }
 }
+
+# ==============================================================================
+# SECURITY & IDENTITY TIER (IAM)
+# ==============================================================================
 
 resource "aws_iam_role" "lambda_role" {
   name = "lambda_dynamo_api_role"
@@ -21,13 +34,15 @@ resource "aws_iam_role" "lambda_role" {
     Statement = [{
       Action    = "sts:AssumeRole"
       Effect    = "Allow"
-      Principal = { Service = "://amazonaws.com" }
+      Principal = { Service = "lambda.amazonaws.com" }
     }]
   })
 }
 
 resource "aws_iam_policy" "lambda_policy" {
-  name = "lambda_dynamo_minimum_policy"
+  name        = "lambda_dynamo_minimum_policy"
+  description = "Provides precise minimal cloud permissions for DynamoDB access and CloudWatch logs"
+
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
@@ -38,8 +53,8 @@ resource "aws_iam_policy" "lambda_policy" {
       },
       {
         Effect   = "Allow"
-        Action   = ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "arn:aws:logs:*:*:*"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "${aws_cloudwatch_log_group.lambda_logs.arn}:*"
       }
     ]
   })
@@ -49,6 +64,10 @@ resource "aws_iam_role_policy_attachment" "attach" {
   role       = aws_iam_role.lambda_role.name
   policy_arn = aws_iam_policy.lambda_policy.arn
 }
+
+# ==============================================================================
+# COMPUTE TIER (AWS LAMBDA)
+# ==============================================================================
 
 data "archive_file" "lambda_zip" {
   type        = "zip"
@@ -60,10 +79,19 @@ data "archive_file" "lambda_zip" {
       dynamodb = boto3.resource('dynamodb')
       table = dynamodb.Table(os.environ['TABLE_NAME'])
       def lambda_handler(event, context):
-          return {'statusCode': 200, 'body': json.dumps({'message': 'Hello from Serverless IaC backend'})}
+          return {
+              'statusCode': 200,
+              'headers': {'Content-Type': 'application/json'},
+              'body': json.dumps({'status': 'success', 'message': 'Hello from Serverless IaC backend!'})
+          }
       EOF
     filename = "index.py"
   }
+}
+
+resource "aws_cloudwatch_log_group" "lambda_logs" {
+  name              = "/aws/lambda/ServerlessApiHandler"
+  retention_in_days = 7
 }
 
 resource "aws_lambda_function" "api_backend" {
@@ -77,7 +105,13 @@ resource "aws_lambda_function" "api_backend" {
   environment {
     variables = { TABLE_NAME = aws_dynamodb_table.db.name }
   }
+
+  depends_on = [aws_cloudwatch_log_group.lambda_logs]
 }
+
+# ==============================================================================
+# INGRESS TIER (API GATEWAY V2)
+# ==============================================================================
 
 resource "aws_apigatewayv2_api" "http_api" {
   name          = "serverless-http-api"
@@ -106,6 +140,6 @@ resource "aws_lambda_permission" "apigw_permission" {
   statement_id  = "AllowAPIGatewayInvoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.api_backend.function_name
-  principal     = "://amazonaws.com"
+  principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.http_api.execution_arn}/*/*"
 }
